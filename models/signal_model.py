@@ -1,10 +1,18 @@
+"""
+Model Layer: Handles TCP socket streaming, byte buffering, 
+rolling visualization windows, signal recording, and DSP algorithms.
+"""
+
 import socket
 import numpy as np
 from scipy.signal import butter, filtfilt
 from PySide6.QtCore import QObject, Signal, QThread
 
 class TCPClientWorker(QThread):
-    """Background worker thread for non-blocking TCP socket communication."""
+    """
+    Background worker thread for non-blocking TCP socket communication.
+    Accumulates raw byte buffers and parses float64 packets.
+    """
     data_received = Signal(np.ndarray)
     status_changed = Signal(str, bool)
     error_occurred = Signal(str)
@@ -15,13 +23,15 @@ class TCPClientWorker(QThread):
         self.port = port
         self.running = False
         self.socket = None
-        # Packet specification: 32 channels * 18 samples * 8 bytes (float64) = 4608 bytes
+        
+        # Packet Specs: 32 channels * 18 samples * 8 bytes (float64) = 4608 bytes
         self.bytes_per_sample = 8
         self.channels = 32
         self.samples_per_chunk = 18
         self.packet_size = self.channels * self.samples_per_chunk * self.bytes_per_sample
 
     def run(self):
+        """Connects to socket server and continuously streams and unpacks bytes."""
         self.running = True
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -29,7 +39,7 @@ class TCPClientWorker(QThread):
             self.socket.connect((self.host, self.port))
             self.status_changed.emit(f"Connected to {self.host}:{self.port}", True)
         except Exception as e:
-            self.error_occurred.emit(f"Connection failed: {str(e)}")
+            self.error_occurred.emit(f"Could not connect: {str(e)}")
             self.status_changed.emit("Disconnected", False)
             self.running = False
             return
@@ -40,7 +50,7 @@ class TCPClientWorker(QThread):
             try:
                 chunk = self.socket.recv(4096)
                 if not chunk:
-                    self.error_occurred.emit("Server closed connection.")
+                    self.error_occurred.emit("Server closed TCP connection.")
                     break
                 byte_buffer.extend(chunk)
 
@@ -64,6 +74,7 @@ class TCPClientWorker(QThread):
         self.stop_connection()
 
     def stop_connection(self):
+        """Safely closes socket connection."""
         self.running = False
         if self.socket:
             try:
@@ -75,7 +86,10 @@ class TCPClientWorker(QThread):
 
 
 class SignalModel(QObject):
-    """Model managing signal state, signal processing algorithms, and recorded data."""
+    """
+    Model managing signal state, rolling live buffers, full dynamic recording,
+    and digital signal processing algorithms (RMS & Butterworth Filter).
+    """
     data_updated = Signal()
     status_changed = Signal(str, bool)
     error_occurred = Signal(str)
@@ -84,12 +98,12 @@ class SignalModel(QObject):
         super().__init__()
         self.num_channels = 32
         self.buffer_size = buffer_size
-        self.sample_rate = 250.0  # Assumed sampling rate in Hz
+        self.sample_rate = 250.0  # Hz
 
-        # Rolling buffer for live visualization: shape (32, buffer_size)
+        # Rolling live buffer (32 channels x 1000 samples = 4.0 seconds)
         self.live_buffer = np.zeros((self.num_channels, self.buffer_size))
-
-        # Full dynamic recording for offline analysis
+        
+        # Session storage for offline inspection
         self.recorded_chunks = []
         self.worker = None
 
@@ -110,23 +124,23 @@ class SignalModel(QObject):
             self.worker.wait()
 
     def _handle_incoming_data(self, chunk: np.ndarray):
-        # Shift rolling buffer left and insert new 18 samples
         n_samples = chunk.shape[1]
         self.live_buffer = np.roll(self.live_buffer, -n_samples, axis=1)
         self.live_buffer[:, -n_samples:] = chunk
 
-        # Append to offline recording store
         self.recorded_chunks.append(chunk)
         self.data_updated.emit()
 
     def get_recorded_signal(self) -> np.ndarray:
+        """Returns full session time-series matrix shape (32 channels, N samples)."""
         if not self.recorded_chunks:
             return np.zeros((self.num_channels, 0))
         return np.hstack(self.recorded_chunks)
 
+    # --- DSP Algorithms ---
     @staticmethod
     def compute_rms(data: np.ndarray, window_size: int = 20) -> np.ndarray:
-        """Calculates moving Root Mean Square across time axis."""
+        """Moving Root Mean Square across time axis (Window = 20 samples / 80ms)."""
         if data.size == 0 or data.shape[1] < window_size:
             return np.zeros_like(data)
         output = np.zeros_like(data)
@@ -134,4 +148,17 @@ class SignalModel(QObject):
             start_idx = max(0, i - window_size + 1)
             output[:, i] = np.sqrt(np.mean(data[:, start_idx:i+1]**2, axis=1))
         return output
-    
+
+    @staticmethod
+    def apply_butterworth_filter(data: np.ndarray, lowcut=0.5, highcut=40.0, fs=250.0) -> np.ndarray:
+        """4th-order Butterworth Bandpass Filter (0.5 Hz - 40 Hz)."""
+        if data.size == 0 or data.shape[1] < 15:
+            return data
+        try:
+            nyq = 0.5 * fs
+            low = lowcut / nyq
+            high = highcut / nyq
+            b, a = butter(4, [low, high], btype='band')
+            return filtfilt(b, a, data, axis=1)
+        except Exception:
+            return data

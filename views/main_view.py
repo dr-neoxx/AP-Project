@@ -1,229 +1,354 @@
+"""
+View Layer: PySide6 Layout hosting VisPy Canvas (with fixed axis bounds)
+and Matplotlib Canvas (for offline analysis across all Signal Modes).
+"""
+
+import os
 import numpy as np
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QComboBox, QCheckBox, QTabWidget,
-    QMessageBox, QGroupBox, QSpinBox
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+    QLineEdit, QPushButton, QComboBox, QCheckBox, QTabWidget, 
+    QGroupBox, QSlider, QStatusBar, QTableWidget, QTableWidgetItem,
+    QFileDialog, QHeaderView, QMessageBox
 )
 from PySide6.QtCore import Qt
 
-# VisPy components for real-time visualization
+# VisPy Canvas & Axis Widgets
 from vispy import scene
 
-# Matplotlib components for offline analysis
+# Matplotlib Canvas
+import matplotlib
+matplotlib.use('QtAgg')
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 
-class VisPyPlotCanvas(QWidget):
-    """High-performance VisPy SceneCanvas wrapper embedded in Qt layout."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.canvas = scene.SceneCanvas(keys=None, show=False, bgcolor="black")
-        self.view = self.canvas.central_widget.add_view()
-        self.view.camera = scene.PanZoomCamera(rect=(0, -5, 1000, 10))
-
-        # Add visual line
-        self.line = scene.visuals.Line(color="cyan", parent=self.view.scene, antialias=True)
-        self.grid = scene.visuals.GridLines(color=(0.3, 0.3, 0.3, 0.5), parent=self.view.scene)
-
-        # Integrate VisPy canvas native widget into PySide6 layout
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.canvas.native)
-
-    def update_single_channel(self, signal_data: np.ndarray):
-        n_samples = len(signal_data)
-        x = np.arange(n_samples)
-        y = signal_data
-        pos = np.column_stack((x, y))
-        self.line.set_data(pos=pos, color="cyan")
-        
-        # Adjust view bounds dynamically
-        if n_samples > 0:
-            ymin, ymax = np.min(y), np.max(y)
-            margin = max(abs(ymax - ymin) * 0.2, 1.0)
-            self.view.camera.rect = (0, ymin - margin, n_samples, (ymax - ymin) + 2 * margin)
-
-    def update_all_channels(self, signal_data: np.ndarray, vertical_offset: float = 5.0):
-        channels, n_samples = signal_data.shape
-        x = np.tile(np.arange(n_samples), channels)
-        
-        # Apply vertical offset per channel for clean stacked view
-        offsets = (np.arange(channels) * vertical_offset)[:, None]
-        y_offset = signal_data + offsets
-        y = y_offset.flatten()
-        
-        pos = np.column_stack((x, y))
-        self.line.set_data(pos=pos, color="lime", connect="strip")
-        
-        total_height = channels * vertical_offset
-        self.view.camera.rect = (0, -vertical_offset, n_samples, total_height + vertical_offset)
-
-
 class MainView(QMainWindow):
-    """Main Application GUI View."""
-
     def __init__(self, viewmodel):
         super().__init__()
         self.vm = viewmodel
-        self.setWindowTitle("TCP Signal Visualization Application — MVVM")
-        self.resize(1100, 750)
+        self.setWindowTitle("TCP Signal Visualization Application — MVVM Architecture")
+        self.resize(1200, 800)
 
-        self._init_ui()
-        self._bind_viewmodel()
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        self.main_layout = QVBoxLayout(central_widget)
 
-    def _init_ui(self):
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        main_layout = QVBoxLayout(main_widget)
+        self._create_connection_panel()
+        self._create_control_panel()
+        self._create_tabs_panel()
+        self._create_status_bar()
 
-        # 1. Connection Header
-        conn_group = QGroupBox("TCP Connection Settings")
-        conn_layout = QHBoxLayout(conn_group)
+        self.vm.data_updated.connect(self._update_live_vispy_plot)
+        self.vm.status_changed.connect(self._on_status_changed)
+        self.vm.error_occurred.connect(self._on_error_occurred)
+        self.vm.metrics_updated.connect(self._on_metrics_updated)
 
-        conn_layout.addWidget(QLabel("Host:"))
+    # --- Connection Panel ---
+    def _create_connection_panel(self):
+        group = QGroupBox("TCP Connection Settings")
+        layout = QHBoxLayout(group)
+
+        layout.addWidget(QLabel("Host:"))
         self.host_input = QLineEdit("127.0.0.1")
-        conn_layout.addWidget(self.host_input)
+        layout.addWidget(self.host_input)
 
-        conn_layout.addWidget(QLabel("Port:"))
+        layout.addWidget(QLabel("Port:"))
         self.port_input = QLineEdit("5000")
-        conn_layout.addWidget(self.port_input)
+        layout.addWidget(self.port_input)
 
         self.btn_connect = QPushButton("Connect")
+        self.btn_connect.clicked.connect(self._on_connect_clicked)
+        layout.addWidget(self.btn_connect)
+
         self.btn_disconnect = QPushButton("Disconnect")
         self.btn_disconnect.setEnabled(False)
-        conn_layout.addWidget(self.btn_connect)
-        conn_layout.addWidget(self.btn_disconnect)
+        self.btn_disconnect.clicked.connect(self._on_disconnect_clicked)
+        layout.addWidget(self.btn_disconnect)
 
-        self.status_label = QLabel("Status: Disconnected")
-        self.status_label.setStyleSheet("color: red; font-weight: bold;")
-        conn_layout.addWidget(self.status_label)
-        main_layout.addWidget(conn_group)
+        self.status_lbl = QLabel("Status: Disconnected")
+        self.status_lbl.setStyleSheet("color: #ff5555; font-weight: bold;")
+        layout.addWidget(self.status_lbl)
 
-        # 2. Controls Panel
-        ctrl_group = QGroupBox("Signal Controls")
-        ctrl_layout = QHBoxLayout(ctrl_group)
+        self.main_layout.addWidget(group)
 
-        ctrl_layout.addWidget(QLabel("Signal Mode:"))
+    # --- Control Panel ---
+    def _create_control_panel(self):
+        group = QGroupBox("Signal Controls & Display Options")
+        layout = QHBoxLayout(group)
+
+        layout.addWidget(QLabel("Signal Mode:"))
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Original", "RMS", "Filtered"])
-        ctrl_layout.addWidget(self.mode_combo)
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        layout.addWidget(self.mode_combo)
 
-        ctrl_layout.addWidget(QLabel("Channel:"))
-        self.channel_spin = QSpinBox()
-        self.channel_spin.setRange(1, 32)
-        self.channel_spin.setValue(1)
-        ctrl_layout.addWidget(self.channel_spin)
+        layout.addWidget(QLabel("Channel:"))
+        self.channel_combo = QComboBox()
+        self.channel_combo.addItems([f"Channel {i+1}" for i in range(32)])
+        self.channel_combo.currentIndexChanged.connect(self._on_channel_changed)
+        layout.addWidget(self.channel_combo)
 
-        self.btn_plot_all = QCheckBox("Plot All Channels")
-        ctrl_layout.addWidget(self.btn_plot_all)
-        main_layout.addWidget(ctrl_group)
+        self.cb_plot_all = QCheckBox("Plot All Channels")
+        self.cb_plot_all.toggled.connect(self._on_plot_all_toggled)
+        layout.addWidget(self.cb_plot_all)
 
-        # 3. Main Visualization Tabs
+        layout.addWidget(QLabel("Gain Zoom:"))
+        self.gain_slider = QSlider(Qt.Horizontal)
+        self.gain_slider.setRange(1, 50)
+        self.gain_slider.setValue(10)
+        self.gain_slider.valueChanged.connect(self._on_gain_changed)
+        layout.addWidget(self.gain_slider)
+        
+        self.gain_val_lbl = QLabel("1.0x")
+        layout.addWidget(self.gain_val_lbl)
+
+        self.main_layout.addWidget(group)
+
+    # --- Tabs Panel ---
+    def _create_tabs_panel(self):
         self.tabs = QTabWidget()
         
-        # Tab 1: VisPy Live Visualization
-        self.vispy_canvas = VisPyPlotCanvas()
-        self.tabs.addTab(self.vispy_canvas, "Live View (VisPy)")
+        # Tab 1: VisPy Live View with Scaled Grid & Constrained Axes
+        self.vispy_tab = QWidget()
+        vispy_layout = QVBoxLayout(self.vispy_tab)
+        
+        self.canvas = scene.SceneCanvas(keys='interactive', show=True, bgcolor='#121212')
+        grid = self.canvas.central_widget.add_grid(margin=15)
+        grid.spacing = 0
+
+        # Main Plot Viewport
+        self.view = grid.add_view(row=0, col=1)
+        self.view.camera = 'panzoom'
+        self.view.camera.rect = (0, -2, 4.0, 4)
+
+        # X-Axis (Bottom) with increased margins to prevent line overlap
+        self.x_axis = scene.AxisWidget(
+            orientation='bottom', 
+            axis_label='Time (seconds)',
+            axis_font_size=10,
+            tick_font_size=9,
+            tick_label_margin=32,
+            axis_label_margin=65
+        )
+        self.x_axis.height_max = 90
+
+        # Y-Axis (Left)
+        self.y_axis = scene.AxisWidget(
+            orientation='left', 
+            axis_label='Amplitude',
+            axis_font_size=10,
+            tick_font_size=9,
+            tick_label_margin=12,
+            axis_label_margin=55
+        )
+        self.y_axis.width_max = 90
+
+        grid.add_widget(self.x_axis, row=1, col=1)
+        grid.add_widget(self.y_axis, row=0, col=0)
+        
+        # Right margin buffer to prevent clipping of rightmost X-tick values
+        right_padding = grid.add_widget(row=0, col=2)
+        right_padding.width_max = 30
+
+        self.x_axis.link_view(self.view)
+        self.y_axis.link_view(self.view)
+
+        # Pre-allocate 32 VisPy lines
+        self.lines = []
+        colors = ['#00ffff', '#ff00ff', '#ffff00', '#00ff00', '#ff8800', '#0088ff']
+        for i in range(32):
+            line = scene.visuals.Line(color=colors[i % len(colors)], parent=self.view.scene)
+            line.visible = (i == 0)
+            self.lines.append(line)
+            
+        vispy_layout.addWidget(self.canvas.native)
+        self.tabs.addTab(self.vispy_tab, "Live View (VisPy)")
 
         # Tab 2: Matplotlib Offline Inspection
-        self.offline_widget = QWidget()
-        offline_layout = QVBoxLayout(self.offline_widget)
+        self.mpl_tab = QWidget()
+        mpl_layout = QHBoxLayout(self.mpl_tab)
+
+        left_box = QWidget()
+        left_layout = QVBoxLayout(left_box)
         
-        self.fig = Figure(figsize=(8, 4))
-        self.mpl_canvas = FigureCanvas(self.fig)
-        self.ax = self.fig.add_subplot(111)
+        self.btn_inspect = QPushButton("Inspect & Plot Offline Data")
+        self.btn_inspect.clicked.connect(self._on_inspect_offline_clicked)
+        left_layout.addWidget(self.btn_inspect)
+
+        self.fig = Figure(figsize=(6, 4), facecolor='#1e1e1e')
+        self.canvas_mpl = FigureCanvas(self.fig)
+        left_layout.addWidget(self.canvas_mpl)
+
+        export_layout = QHBoxLayout()
+        self.btn_export_plot = QPushButton("Export Plot (PNG)")
+        self.btn_export_plot.clicked.connect(self._export_plot)
+        self.btn_export_csv = QPushButton("Export Data (CSV)")
+        self.btn_export_csv.clicked.connect(self._export_csv)
+        export_layout.addWidget(self.btn_export_plot)
+        export_layout.addWidget(self.btn_export_csv)
+        left_layout.addLayout(export_layout)
+
+        mpl_layout.addWidget(left_box, stretch=2)
+
+        right_box = QWidget()
+        right_layout = QVBoxLayout(right_box)
+        right_layout.addWidget(QLabel("<b>Channel Statistics Summary</b>"))
         
-        self.btn_refresh_offline = QPushButton("Inspect Offline Data")
-        offline_layout.addWidget(self.btn_refresh_offline)
-        offline_layout.addWidget(self.mpl_canvas)
-        self.tabs.addTab(self.offline_widget, "Offline Inspection (Matplotlib)")
+        self.stats_table = QTableWidget(32, 4)
+        self.stats_table.setHorizontalHeaderLabels(["Mean", "Std Dev", "Pk-Pk", "RMS"])
+        self.stats_table.setVerticalHeaderLabels([f"Ch {i+1}" for i in range(32)])
+        self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        right_layout.addWidget(self.stats_table)
 
-        main_layout.addWidget(self.tabs)
+        mpl_layout.addWidget(right_box, stretch=1)
 
-    def _bind_viewmodel(self):
-        # Event Handlers -> ViewModel Actions
-        self.btn_connect.clicked.connect(
-            lambda: self.vm.connect_tcp(self.host_input.text().strip(), self.port_input.text().strip())
-        )
-        self.btn_disconnect.clicked.connect(self.vm.disconnect_tcp)
+        self.tabs.addTab(self.mpl_tab, "Offline Analytics (Matplotlib)")
+        self.main_layout.addWidget(self.tabs)
 
-        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
-        self.channel_spin.valueChanged.connect(self._on_channel_changed)
-        self.btn_plot_all.toggled.connect(self._on_plot_all_toggled)
+    # --- Status Bar ---
+    def _create_status_bar(self):
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        
+        self.sb_packets_lbl = QLabel("Packets Received: 0")
+        self.sb_rate_lbl = QLabel("Sample Rate: 250 Hz")
+        
+        self.status_bar.addPermanentWidget(self.sb_rate_lbl)
+        self.status_bar.addPermanentWidget(self.sb_packets_lbl)
+        self.status_bar.showMessage("Ready.")
 
-        self.btn_refresh_offline.clicked.connect(self.update_offline_plot)
+    # --- Event Handlers ---
+    def _on_connect_clicked(self):
+        host = self.host_input.text().strip()
+        try:
+            port = int(self.port_input.text().strip())
+            self.vm.connect_tcp(host, port)
+        except ValueError:
+            QMessageBox.critical(self, "Invalid Input", "Port must be an integer.")
 
-        # ViewModel -> View Updates
-        self.vm.status_changed.connect(self.update_connection_status)
-        self.vm.error_occurred.connect(self.show_error)
-        self.vm.live_data_updated.connect(self.update_live_plot)
+    def _on_disconnect_clicked(self):
+        self.vm.disconnect_tcp()
 
-    def _on_mode_changed(self, mode_text: str):
-        self.vm.signal_mode = mode_text
-        self.update_live_plot()
+    def _on_mode_changed(self, text):
+        self.vm.signal_mode = text
+        if self.tabs.currentIndex() == 1:
+            self._on_inspect_offline_clicked()
 
-    def _on_channel_changed(self, channel_num: int):
-        self.vm.selected_channel = channel_num - 1  # 0-indexed
-        self.update_live_plot()
+    def _on_channel_changed(self, index):
+        self.vm.selected_channel = index
+        if self.tabs.currentIndex() == 1:
+            self._on_inspect_offline_clicked()
 
-    def _on_plot_all_toggled(self, checked: bool):
-        self.vm.plot_all_channels = checked
-        self.channel_spin.setEnabled(not checked)
-        self.update_live_plot()
+    def _on_plot_all_toggled(self, checked):
+        self.vm.plot_all = checked
+        self.channel_combo.setEnabled(not checked)
+        if self.tabs.currentIndex() == 1:
+            self._on_inspect_offline_clicked()
 
-    def update_connection_status(self, message: str, is_connected: bool):
-        self.status_label.setText(f"Status: {message}")
-        if is_connected:
-            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+    def _on_gain_changed(self, val):
+        gain_factor = val / 10.0
+        self.gain_val_lbl.setText(f"{gain_factor:.1f}x")
+        self.vm.gain = gain_factor
+
+    def _on_status_changed(self, msg, connected):
+        self.status_lbl.setText(f"Status: {msg}")
+        if connected:
+            self.status_lbl.setStyleSheet("color: #55ff55; font-weight: bold;")
             self.btn_connect.setEnabled(False)
             self.btn_disconnect.setEnabled(True)
+            self.status_bar.showMessage("Streaming TCP data...")
         else:
-            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            self.status_lbl.setStyleSheet("color: #ff5555; font-weight: bold;")
             self.btn_connect.setEnabled(True)
             self.btn_disconnect.setEnabled(False)
+            self.status_bar.showMessage("Disconnected.")
 
-    def show_error(self, message: str):
-        QMessageBox.warning(self, "Application Error", message)
+    def _on_error_occurred(self, err):
+        self.status_bar.showMessage(f"Error: {err}")
 
-    def update_live_plot(self):
-        if self.tabs.currentIndex() != 0:
-            return  # Only update live tab if active
+    def _on_metrics_updated(self, packet_count):
+        self.sb_packets_lbl.setText(f"Packets Received: {packet_count}")
 
-        data = self.vm.get_live_plot_data()
-        if data.size == 0:
+    # --- VisPy Live Plot Update ---
+    def _update_live_vispy_plot(self):
+        data = self.vm.get_processed_live_data()
+        n_samples = data.shape[1]
+        time_x = np.linspace(0, 4.0, n_samples)
+
+        if self.vm.plot_all:
+            offset_step = 2.0
+            for ch in range(32):
+                y = data[ch, :] + (15.5 - ch) * offset_step
+                pts = np.column_stack((time_x, y))
+                self.lines[ch].set_data(pos=pts)
+                self.lines[ch].visible = True
+            self.view.camera.rect = (0, -35, 4.0, 70)
+        else:
+            sel_ch = self.vm.selected_channel
+            for ch in range(32):
+                if ch == sel_ch:
+                    pts = np.column_stack((time_x, data[ch, :]))
+                    self.lines[ch].set_data(pos=pts)
+                    self.lines[ch].visible = True
+                else:
+                    self.lines[ch].visible = False
+            self.view.camera.rect = (0, -3, 4.0, 6)
+
+    # --- Offline Matplotlib Inspection ---
+    def _on_inspect_offline_clicked(self):
+        recorded = self.vm.get_processed_offline_data()
+        if recorded.size == 0 or recorded.shape[1] == 0:
+            QMessageBox.warning(self, "No Recorded Data", "No signal data available for offline plotting. Connect to server first.")
             return
 
-        if self.vm.plot_all_channels:
-            self.vispy_canvas.update_all_channels(data)
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        ax.set_facecolor('#121212')
+        ax.tick_params(colors='white')
+        ax.xaxis.label.set_color('white')
+        ax.yaxis.label.set_color('white')
+        ax.title.set_color('white')
+
+        time_axis = np.arange(recorded.shape[1]) / 250.0
+        mode_str = self.vm.signal_mode
+
+        if self.vm.plot_all:
+            for ch in range(min(8, recorded.shape[0])):
+                ax.plot(time_axis, recorded[ch, :] + ch * 2, label=f"Ch {ch+1}")
+            ax.set_title(f"Offline Inspection — Multi-Channel ({mode_str} Mode)")
+            ax.legend(loc="upper right", fontsize='small')
         else:
             ch = self.vm.selected_channel
-            self.vispy_canvas.update_single_channel(data[ch, :])
+            ax.plot(time_axis, recorded[ch, :], color='#00ffff')
+            ax.set_title(f"Offline Inspection — Channel {ch+1} ({mode_str} Mode)")
 
-    def update_offline_plot(self):
-        data = self.vm.get_offline_plot_data()
-        self.ax.clear()
-
-        if data.shape[1] == 0:
-            self.ax.set_title("No recorded signal available. Run streaming first.")
-            self.mpl_canvas.draw()
-            return
-
-        time_axis = np.arange(data.shape[1]) / self.vm.model.sample_rate
-
-        if self.vm.plot_all_channels:
-            for i in range(data.shape[0]):
-                self.ax.plot(time_axis, data[i, :] + (i * 5.0), label=f"Ch {i+1}" if i < 3 else "")
-            self.ax.set_ylabel("Amplitude + Vertical Offset")
-        else:
-            ch = self.vm.selected_channel
-            self.ax.plot(time_axis, data[ch, :], color="blue", label=f"Channel {ch+1}")
-            self.ax.set_ylabel("Amplitude")
-
-        self.ax.set_title(f"Offline Signal Analysis — Mode: {self.vm.signal_mode}")
-        self.ax.set_xlabel("Time (s)")
-        self.ax.grid(True)
+        ax.set_xlabel("Time (seconds)")
+        ax.set_ylabel("Amplitude")
+        ax.grid(True, color='#333333')
         self.fig.tight_layout()
-        self.mpl_canvas.draw()
-        
+        self.canvas_mpl.draw()
+
+        stats = self.vm.compute_offline_statistics()
+        for ch, metrics in stats.items():
+            self.stats_table.setItem(ch - 1, 0, QTableWidgetItem(f"{metrics['mean']:.3f}"))
+            self.stats_table.setItem(ch - 1, 1, QTableWidgetItem(f"{metrics['std']:.3f}"))
+            self.stats_table.setItem(ch - 1, 2, QTableWidgetItem(f"{metrics['peak_to_peak']:.3f}"))
+            self.stats_table.setItem(ch - 1, 3, QTableWidgetItem(f"{metrics['rms']:.3f}"))
+
+    def _export_plot(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Plot", "offline_signal.png", "PNG Image (*.png);;PDF File (*.pdf)")
+        if file_path:
+            self.fig.savefig(file_path, dpi=300)
+            QMessageBox.information(self, "Export Complete", f"Saved plot to {os.path.basename(file_path)}")
+
+    def _export_csv(self):
+        recorded = self.vm.get_processed_offline_data()
+        if recorded.size == 0:
+            QMessageBox.warning(self, "Export Error", "No data to export.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Data CSV", "recorded_signals.csv", "CSV File (*.csv)")
+        if file_path:
+            np.savetxt(file_path, recorded.T, delimiter=",", header=",".join([f"Ch_{i+1}" for i in range(32)]))
+            QMessageBox.information(self, "Export Complete", f"Saved data to {os.path.basename(file_path)}")

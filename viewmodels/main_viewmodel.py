@@ -1,58 +1,116 @@
+"""
+ViewModel Layer: Manages application state, signal selection, 
+and transforms raw data into presentation format for the View.
+"""
+
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
-
 class MainViewModel(QObject):
-    """ViewModel managing UI logic, plot modes, and channel selection state."""
-
+    data_updated = Signal()
     status_changed = Signal(str, bool)
     error_occurred = Signal(str)
-    live_data_updated = Signal()
+    metrics_updated = Signal(int)
 
     def __init__(self, model):
         super().__init__()
-        self.model = model
+        self._model = model
+        
+        # State Properties
+        self._selected_channel = 0
+        self._signal_mode = "Original"  # "Original", "RMS", "Filtered"
+        self._plot_all = False
+        self._gain = 1.0
+        self._packet_count = 0
 
-        # ViewModel State Properties
-        self.selected_channel = 0  # 0 to 31
-        self.signal_mode = "Original"  # Options: 'Original', 'RMS', 'Filtered'
-        self.plot_all_channels = False
+        self._model.data_updated.connect(self._on_data_updated)
+        self._model.status_changed.connect(self.status_changed.emit)
+        self._model.error_occurred.connect(self.error_occurred.emit)
 
-        # Connect model signals
-        self.model.status_changed.connect(self.status_changed.emit)
-        self.model.error_occurred.connect(self.error_occurred.emit)
-        self.model.data_updated.connect(self.live_data_updated.emit)
+    def _on_data_updated(self):
+        self._packet_count += 1
+        self.metrics_updated.emit(self._packet_count)
+        self.data_updated.emit()
 
-    def connect_tcp(self, host: str, port_str: str):
-        try:
-            port = int(port_str)
-            if not (1 <= port <= 65535):
-                raise ValueError("Port must be between 1 and 65535.")
-            self.model.start_connection(host, port)
-        except ValueError as e:
-            self.error_occurred.emit(f"Invalid Port: {str(e)}")
+    def connect_tcp(self, host: str, port: int):
+        self._packet_count = 0
+        self._model.start_connection(host, port)
 
     def disconnect_tcp(self):
-        self.model.stop_connection()
+        self._model.stop_connection()
 
-    def process_data(self, data: np.ndarray) -> np.ndarray:
-        """Applies selected processing mode (Original, RMS, or Filtered) to signal data."""
+    # --- Properties ---
+    @property
+    def selected_channel(self) -> int:
+        return self._selected_channel
+
+    @selected_channel.setter
+    def selected_channel(self, index: int):
+        self._selected_channel = max(0, min(index, 31))
+        self.data_updated.emit()
+
+    @property
+    def signal_mode(self) -> str:
+        return self._signal_mode
+
+    @signal_mode.setter
+    def signal_mode(self, mode: str):
+        if mode in ["Original", "RMS", "Filtered"]:
+            self._signal_mode = mode
+            self.data_updated.emit()
+
+    @property
+    def plot_all(self) -> bool:
+        return self._plot_all
+
+    @plot_all.setter
+    def plot_all(self, value: bool):
+        self._plot_all = value
+        self.data_updated.emit()
+
+    @property
+    def gain(self) -> float:
+        return self._gain
+
+    @gain.setter
+    def gain(self, value: float):
+        self._gain = max(0.1, min(value, 10.0))
+        self.data_updated.emit()
+
+    # --- Processing Handlers ---
+    def _process_data(self, data: np.ndarray) -> np.ndarray:
+        """Applies active Signal Mode (Original, RMS, or Filtered) to dataset."""
         if data.size == 0:
             return data
+        
+        scaled_data = data * self._gain
+        if self._signal_mode == "RMS":
+            return self._model.compute_rms(scaled_data)
+        elif self._signal_mode == "Filtered":
+            return self._model.apply_butterworth_filter(scaled_data)
+        return scaled_data
 
-        if self.signal_mode == "RMS":
-            return self.model.compute_rms(data, window_size=25)
-        elif self.signal_mode == "Filtered":
-            return self.model.apply_filter(data, lowcut=1.0, highcut=40.0)
-        return data  # Original
+    def get_processed_live_data(self) -> np.ndarray:
+        """Returns live rolling buffer processed by active Signal Mode."""
+        return self._process_data(self._model.live_buffer.copy())
 
-    def get_live_plot_data(self) -> np.ndarray:
-        """Retrieves and processes current live buffer window."""
-        raw_data = self.model.live_buffer
-        return self.process_data(raw_data)
+    def get_processed_offline_data(self) -> np.ndarray:
+        """Returns recorded session matrix processed by active Signal Mode."""
+        return self._process_data(self._model.get_recorded_signal())
 
-    def get_offline_plot_data(self) -> np.ndarray:
-        """Retrieves and processes recorded streaming data."""
-        raw_data = self.model.get_recorded_signal()
-        return self.process_data(raw_data)
-    
+    def compute_offline_statistics(self) -> dict:
+        """Computes statistical metrics for all recorded channels."""
+        data = self.get_processed_offline_data()
+        if data.size == 0:
+            return {}
+        
+        stats = {}
+        for ch in range(data.shape[0]):
+            ch_data = data[ch, :]
+            stats[ch + 1] = {
+                "mean": np.mean(ch_data),
+                "std": np.std(ch_data),
+                "peak_to_peak": np.ptp(ch_data),
+                "rms": np.sqrt(np.mean(ch_data**2))
+            }
+        return stats
