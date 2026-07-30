@@ -293,7 +293,15 @@ class MainView(QMainWindow):
                     self.lines[ch].visible = True
                 else:
                     self.lines[ch].visible = False
-            self.view.camera.rect = (0, -3, 4.0, 6)
+            
+            # Adapt Y-axis camera limits based on signal mode
+            if self.vm.signal_mode == "RMS":
+                # RMS is strictly positive [0, +4]
+                self.view.camera.rect = (0, 0, 4.0, 4)
+            else:
+                # Original and Filtered modes oscillate around 0 [-3, +3]
+                self.view.camera.rect = (0, -3, 4.0, 6)
+    
 
     # --- Offline Matplotlib Inspection ---
     def _on_inspect_offline_clicked(self):
