@@ -297,12 +297,37 @@ class MainView(QMainWindow):
                     self.lines[ch].visible = False
             
             # Adapt Y-axis camera limits based on signal mode
+            visible_y = data[sel_ch, :]
+
             if self.vm.signal_mode == "RMS":
-                # RMS is strictly positive [0, +4]
-                self.view.camera.rect = (0, 0, 4.0, 4)
+                y_max = float(np.max(visible_y))
+
+                if y_max <= 0:
+                    y_max = 1.0
+
+                self.view.camera.rect = (
+                    0,
+                    0,
+                    4.0,
+                    y_max * 1.1
+                )
+
             else:
-                # Original and Filtered modes oscillate around 0 [-3, +3]
-                self.view.camera.rect = (0, -3, 4.0, 6)
+                y_min = float(np.min(visible_y))
+                y_max = float(np.max(visible_y))
+
+                if y_min == y_max:
+                    y_min -= 1.0
+                    y_max += 1.0
+
+                padding = (y_max - y_min) * 0.1
+
+                self.view.camera.rect = (
+                    0,
+                    y_min - padding,
+                    4.0,
+                    (y_max - y_min) + (2 * padding)
+                )
     
 
     # --- Offline Matplotlib Inspection ---

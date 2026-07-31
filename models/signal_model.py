@@ -150,7 +150,7 @@ class SignalModel(QObject):
         return output
 
     @staticmethod
-    def apply_butterworth_filter(data: np.ndarray, lowcut=0.5, highcut=40.0, fs=250.0) -> np.ndarray:
+    def apply_butterworth_filter(data: np.ndarray, lowcut=0.5, highcut=40.0, fs=2000.0) -> np.ndarray:
         """4th-order Butterworth Bandpass Filter (0.5 Hz - 40 Hz)."""
         if data.size == 0 or data.shape[1] < 15:
             return data
