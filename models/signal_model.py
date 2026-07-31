@@ -98,7 +98,7 @@ class SignalModel(QObject):
         super().__init__()
         self.num_channels = 32
         self.buffer_size = buffer_size
-        self.sample_rate = 250.0  # Hz
+        self.sample_rate = 2000.0  # Hz
 
         # Rolling live buffer (32 channels x 1000 samples = 4.0 seconds)
         self.live_buffer = np.zeros((self.num_channels, self.buffer_size))

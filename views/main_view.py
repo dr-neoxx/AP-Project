@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QSlider, QStatusBar, QTableWidget, QTableWidgetItem,
     QFileDialog, QHeaderView, QMessageBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 
 # VisPy Canvas & Axis Widgets
 from vispy import scene
@@ -39,7 +39,9 @@ class MainView(QMainWindow):
         self._create_tabs_panel()
         self._create_status_bar()
 
-        self.vm.data_updated.connect(self._update_live_vispy_plot)
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self._update_live_vispy_plot)
+        self.update_timer.start(40)  # Update graph every 40 ms (~25 FPS)
         self.vm.status_changed.connect(self._on_status_changed)
         self.vm.error_occurred.connect(self._on_error_occurred)
         self.vm.metrics_updated.connect(self._on_metrics_updated)
@@ -54,7 +56,7 @@ class MainView(QMainWindow):
         layout.addWidget(self.host_input)
 
         layout.addWidget(QLabel("Port:"))
-        self.port_input = QLineEdit("5000")
+        self.port_input = QLineEdit("12345")
         layout.addWidget(self.port_input)
 
         self.btn_connect = QPushButton("Connect")
@@ -212,7 +214,7 @@ class MainView(QMainWindow):
         self.setStatusBar(self.status_bar)
         
         self.sb_packets_lbl = QLabel("Packets Received: 0")
-        self.sb_rate_lbl = QLabel("Sample Rate: 250 Hz")
+        self.sb_rate_lbl = QLabel("Sample Rate: 2000 Hz")
         
         self.status_bar.addPermanentWidget(self.sb_rate_lbl)
         self.status_bar.addPermanentWidget(self.sb_packets_lbl)
@@ -318,11 +320,11 @@ class MainView(QMainWindow):
         ax.yaxis.label.set_color('white')
         ax.title.set_color('white')
 
-        time_axis = np.arange(recorded.shape[1]) / 250.0
+        time_axis = np.arange(recorded.shape[1]) / 2000.0
         mode_str = self.vm.signal_mode
 
         if self.vm.plot_all:
-            for ch in range(min(8, recorded.shape[0])):
+            for ch in range(recorded.shape[0]):
                 ax.plot(time_axis, recorded[ch, :] + ch * 2, label=f"Ch {ch+1}")
             ax.set_title(f"Offline Inspection — Multi-Channel ({mode_str} Mode)")
             ax.legend(loc="upper right", fontsize='small')
@@ -360,3 +362,8 @@ class MainView(QMainWindow):
         if file_path:
             np.savetxt(file_path, recorded.T, delimiter=",", header=",".join([f"Ch_{i+1}" for i in range(32)]))
             QMessageBox.information(self, "Export Complete", f"Saved data to {os.path.basename(file_path)}")
+
+
+    def closeEvent(self, event):
+        self.vm.disconnect_tcp()
+        event.accept()
